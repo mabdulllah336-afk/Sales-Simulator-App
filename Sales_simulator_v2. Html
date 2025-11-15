@@ -1,0 +1,399 @@
+Call_simulator_v2. Html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Sales Call Simulator</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, getDoc, collection, query, limit, getDocs, orderBy, onSnapshot, updateDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // IMPORTANT: These variables will be provided by the hosting environment in production.
+        // For development, we must use checks.
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : { projectId: "placeholder-project" };
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
+        // Initialize Firebase
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+
+        // Global state
+        let currentUserId = null;
+        let isAuthReady = false;
+
+        // Configuration for the scenario (used by the AI backend)
+        const scenarios = {
+            'skeptical_prospect': {
+                name: 'Skeptical Prospect (Tech)',
+                system: "You are a Chief Technology Officer (CTO) at a mid-sized tech company. You are extremely busy, technically knowledgeable, and highly skeptical of salespeople. Your primary objections are budget constraints and 'we already have a solution that mostly works.' Keep your replies brief and challenging.",
+                initial: "Hello? This is Jane. I hope you're not calling to sell me something."
+            },
+            'friendly_gatekeeper': {
+                name: 'Friendly Gatekeeper (HR)',
+                system: "You are Sarah, a very friendly and overworked HR Manager at a major retail chain. You are warm, but you have no actual budget or decision-making power. Your goal is to be helpful but eventually redirect the salesperson to send an email.",
+                initial: "Hi! Thanks for calling in. How can I help you today?"
+            },
+            'silent_competitor_user': {
+                name: 'Silent Competitor User (Finance)',
+                system: "You are the Head of Finance at a large manufacturing firm. You currently use a competitor's product and are mostly satisfied, but secretly hate their pricing structure. You communicate only in short, direct, fact-based statements. Show no emotion.",
+                initial: "You have thirty seconds. What is this regarding?"
+            }
+        };
+
+        let currentScenario = 'skeptical_prospect';
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const output = document.getElementById('chat-output');
+            const statusDisplay = document.getElementById('status-display');
+            const startSpeakingButton = document.getElementById('start-speaking');
+            const stopSpeakingButton = document.getElementById('stop-speaking');
+            const scenarioSelect = document.getElementById('scenario-select');
+            const userIdDisplay = document.getElementById('user-id-display');
+
+            // Populate the scenario dropdown
+            Object.keys(scenarios).forEach(key => {
+                const option = document.createElement('option');
+                option.value = key;
+                option.textContent = scenarios[key].name;
+                scenarioSelect.appendChild(option);
+            });
+
+            scenarioSelect.addEventListener('change', () => {
+                currentScenario = scenarioSelect.value;
+                resetCall(scenarios[currentScenario].initial);
+            });
+            
+            // --- Firebase Initialization and Auth ---
+            onAuthStateChanged(auth, async (user) => {
+                if (user) {
+                    currentUserId = user.uid;
+                    userIdDisplay.textContent = `User ID: ${currentUserId}`;
+                } else {
+                    // Sign in anonymously if no token is available or user is logged out
+                    try {
+                        await signInAnonymously(auth);
+                        // The onAuthStateChanged listener will fire again with the anonymous user
+                    } catch (error) {
+                        console.error("Error signing in anonymously:", error);
+                    }
+                }
+                isAuthReady = true;
+                if (!user && initialAuthToken) {
+                    // This block is for the specific Canvas environment auth
+                    try {
+                        await signInWithCustomToken(auth, initialAuthToken);
+                    } catch (error) {
+                        console.error("Error signing in with custom token:", error);
+                    }
+                }
+                
+                // Only start the simulation once auth is ready
+                if (isAuthReady) {
+                    resetCall(scenarios[currentScenario].initial);
+                }
+            });
+
+            // --- Speech Recognition Setup ---
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            if (!SpeechRecognition) {
+                statusDisplay.textContent = 'Error: Speech Recognition not supported in this browser.';
+                startSpeakingButton.disabled = true;
+                return;
+            }
+
+            const recognition = new SpeechRecognition();
+            recognition.continuous = false;
+            recognition.lang = 'en-US';
+            recognition.interimResults = false;
+            recognition.maxAlternatives = 1;
+
+            startSpeakingButton.addEventListener('click', () => {
+                if (!isAuthReady) {
+                    statusDisplay.textContent = 'Authentication still loading. Please wait.';
+                    return;
+                }
+                startSpeakingButton.disabled = true;
+                stopSpeakingButton.disabled = false;
+                statusDisplay.textContent = 'Listening... Speak now.';
+                recognition.start();
+            });
+
+            stopSpeakingButton.addEventListener('click', () => {
+                recognition.stop();
+                stopSpeakingButton.disabled = true;
+                statusDisplay.textContent = 'Processing voice...';
+            });
+
+            recognition.onresult = (event) => {
+                const speechResult = event.results[0][0].transcript;
+                statusDisplay.textContent = 'User said: "' + speechResult + '"';
+                appendMessage('user', speechResult);
+                
+                // Send transcribed text to the proxy for AI response
+                generateResponse(speechResult);
+            };
+
+            recognition.onend = () => {
+                if (startSpeakingButton.disabled && stopSpeakingButton.disabled) {
+                    // If we stopped programmatically for processing, leave disabled
+                } else {
+                    // If we stopped naturally, re-enable start
+                    startSpeakingButton.disabled = false;
+                    stopSpeakingButton.disabled = true;
+                }
+            };
+
+            recognition.onerror = (event) => {
+                console.error('Speech recognition error:', event.error);
+                statusDisplay.textContent = 'Error: ' + event.error;
+                startSpeakingButton.disabled = false;
+                stopSpeakingButton.disabled = true;
+            };
+
+            // --- Text-to-Speech (TTS) Setup ---
+            const synth = window.speechSynthesis;
+            
+            function speakText(text) {
+                if (!synth || !text) return;
+
+                const utterance = new SpeechSynthesisUtterance(text);
+                
+                utterance.onstart = () => {
+                    startSpeakingButton.disabled = true;
+                    stopSpeakingButton.disabled = true;
+                    statusDisplay.textContent = 'AI Speaking...';
+                };
+
+                utterance.onend = () => {
+                    statusDisplay.textContent = 'Ready to speak.';
+                    startSpeakingButton.disabled = false;
+                    stopSpeakingButton.disabled = true;
+                };
+
+                utterance.onerror = (event) => {
+                    console.error('TTS error:', event);
+                    statusDisplay.textContent = 'TTS Error. Ready to speak.';
+                    startSpeakingButton.disabled = false;
+                    stopSpeakingButton.disabled = true;
+                };
+
+                synth.speak(utterance);
+            }
+
+            // --- Chat Management and Firebase ---
+            let chatHistory = [];
+            const HISTORY_LIMIT = 20;
+
+            function getChatCollectionRef() {
+                // Public collection for shared sessions
+                return collection(db, 'artifacts', appId, 'public', 'data', 'sales_sim_chats');
+            }
+
+            // Load or initialize chat history for the current user/scenario
+            async function resetCall(initialText) {
+                if (!currentUserId) {
+                    // Wait for auth to be ready
+                    return;
+                }
+                
+                chatHistory = [];
+                output.innerHTML = '';
+                
+                // Use a document ID based on the user and scenario
+                const docId = `${currentUserId}_${currentScenario}`;
+                const chatDocRef = doc(getChatCollectionRef(), docId);
+                
+                try {
+                    const docSnap = await getDoc(chatDocRef);
+                    if (docSnap.exists() && docSnap.data().history) {
+                        chatHistory = docSnap.data().history;
+                        chatHistory.forEach(msg => appendMessage(msg.role, msg.text, false)); // Don't speak history
+                        statusDisplay.textContent = 'Conversation resumed.';
+                    } else {
+                        // Start new conversation
+                        chatHistory.push({ role: 'assistant', text: initialText });
+                        appendMessage('assistant', initialText);
+                        await saveHistory();
+                        statusDisplay.textContent = 'New call started.';
+                    }
+                } catch (e) {
+                    console.error("Error loading chat:", e);
+                    // Fallback: Start new chat if loading fails
+                    chatHistory.push({ role: 'assistant', text: initialText });
+                    appendMessage('assistant', initialText);
+                    statusDisplay.textContent = 'New call started (database error).';
+                }
+                startSpeakingButton.disabled = false;
+            }
+
+            function appendMessage(role, text, shouldSpeak = true) {
+                const messageDiv = document.createElement('div');
+                const roleClass = role === 'user' ? 'bg-indigo-100 text-indigo-800 self-end' : 'bg-gray-100 text-gray-800 self-start';
+                
+                messageDiv.className = `max-w-xs md:max-w-md p-3 rounded-xl shadow-md my-2 break-words ${roleClass}`;
+                messageDiv.textContent = text;
+                output.appendChild(messageDiv);
+                output.scrollTop = output.scrollHeight;
+
+                if (role === 'assistant' && shouldSpeak) {
+                    speakText(text);
+                }
+            }
+
+            async function saveHistory() {
+                if (!currentUserId) return;
+                
+                const docId = `${currentUserId}_${currentScenario}`;
+                const chatDocRef = doc(getChatCollectionRef(), docId);
+                
+                // Keep history size manageable
+                const trimmedHistory = chatHistory.slice(-HISTORY_LIMIT); 
+
+                try {
+                    await setDoc(chatDocRef, { 
+                        userId: currentUserId,
+                        scenario: currentScenario,
+                        history: trimmedHistory,
+                        updatedAt: new Date().toISOString()
+                    }, { merge: true });
+                } catch (e) {
+                    console.error("Error saving chat history:", e);
+                }
+            }
+
+
+            // --- Core Function: Call Proxy Server ---
+            async function generateResponse(userText) {
+                if (!userText.trim()) return;
+
+                statusDisplay.textContent = 'Thinking... (AI Proxy Call)';
+                
+                // Add user message to history
+                chatHistory.push({ role: 'user', text: userText });
+
+                // Construct the system instruction
+                const systemInstruction = scenarios[currentScenario].system;
+                
+                try {
+                    // *** CRITICAL: Call the secure proxy endpoint, not the public API ***
+                    const proxyUrl = '/api/generate-response'; 
+                    
+                    const payload = {
+                        userQuery: userText,
+                        systemPrompt: systemInstruction,
+                        scenario: currentScenario,
+                        history: chatHistory.map(msg => ({ role: msg.role, text: msg.text })) // Send clean history
+                    };
+
+                    const response = await fetch(proxyUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    if (!response.ok) {
+                        const errorText = await response.text();
+                        throw new Error(`Proxy error: ${response.status} - ${errorText}`);
+                    }
+
+                    const result = await response.json();
+                    const aiResponseText = result.text || "I am sorry, I couldn't generate a response.";
+
+                    // Add AI response to history and update UI/Speak
+                    chatHistory.push({ role: 'assistant', text: aiResponseText });
+                    appendMessage('assistant', aiResponseText);
+                    
+                    // Save the updated history to Firestore
+                    await saveHistory();
+
+                } catch (error) {
+                    console.error("AI Generation Error:", error);
+                    statusDisplay.textContent = `Error: ${error.message}. Please check your proxy server logs.`;
+                    startSpeakingButton.disabled = false;
+                }
+            }
+            
+            // Wait for auth to load before calling resetCall
+            if (!isAuthReady) {
+                 statusDisplay.textContent = 'Loading user authentication...';
+            } else {
+                resetCall(scenarios[currentScenario].initial);
+            }
+
+        });
+    </script>
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        /* Style for the chat box to ensure it scrolls */
+        #chat-output {
+            height: 70vh; /* Adjust height for mobile/desktop */
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+        }
+        .main-container {
+            min-height: 100vh;
+        }
+        .control-panel {
+            background-color: #f7fafc;
+        }
+        #start-speaking, #stop-speaking {
+            transition: all 0.2s ease-in-out;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        #start-speaking:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 8px rgba(0, 0, 0, 0.15);
+        }
+        #start-speaking:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body class="bg-gray-50">
+    <div class="main-container flex flex-col items-center p-4">
+        <header class="w-full max-w-4xl text-center py-4">
+            <h1 class="text-3xl font-bold text-indigo-700">📞 Sales Call AI Simulator</h1>
+            <p class="text-sm text-gray-500 mb-2" id="user-id-display">Loading User ID...</p>
+        </header>
+
+        <main class="w-full max-w-4xl bg-white rounded-xl shadow-2xl overflow-hidden flex flex-col">
+            <!-- Control Panel -->
+            <div class="control-panel p-4 border-b border-gray-200 flex flex-wrap gap-3 justify-between items-center">
+                <div class="flex items-center space-x-2">
+                    <label for="scenario-select" class="text-sm font-medium text-gray-700">Scenario:</label>
+                    <select id="scenario-select" class="p-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 text-sm">
+                        <!-- Options populated by JS -->
+                    </select>
+                </div>
+                
+                <div class="flex flex-col sm:flex-row gap-2">
+                    <button id="start-speaking" class="px-6 py-3 bg-green-500 text-white font-semibold rounded-lg hover:bg-green-600 focus:outline-none focus:ring-4 focus:ring-green-300 disabled:bg-gray-400 disabled:cursor-wait transition duration-150 ease-in-out">
+                        Start Speaking
+                    </button>
+                    <button id="stop-speaking" disabled class="px-6 py-3 bg-red-500 text-white font-semibold rounded-lg hover:bg-red-600 focus:outline-none focus:ring-4 focus:ring-red-300 disabled:bg-gray-400 disabled:cursor-wait transition duration-150 ease-in-out">
+                        Stop Recording
+                    </button>
+                </div>
+            </div>
+
+            <!-- Status Display -->
+            <div id="status-display" class="w-full p-3 bg-yellow-100 text-yellow-800 text-center font-medium">
+                Loading user authentication...
+            </div>
+            
+            <!-- Chat Output Area -->
+            <div id="chat-output" class="p-4 bg-white flex-grow">
+                <!-- Messages will appear here -->
+            </div>
+        </main>
+    </div>
+</body>
+</html>
+
